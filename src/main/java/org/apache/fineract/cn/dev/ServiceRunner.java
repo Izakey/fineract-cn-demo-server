@@ -23,13 +23,19 @@ import static org.apache.fineract.cn.accounting.api.v1.EventConstants.POST_LEDGE
 
 import ch.vorburger.mariadb4j.DB;
 import ch.vorburger.mariadb4j.DBConfigurationBuilder;
+
+import java.io.File;
 import java.io.IOException;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.net.MalformedURLException;
 import java.net.URL;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.List;
-import java.util.Scanner;
+import java.net.URLClassLoader;
+import java.util.*;
 import java.util.concurrent.TimeUnit;
+import java.util.jar.Attributes;
+import java.util.jar.JarFile;
+
 import org.apache.fineract.cn.accounting.api.v1.client.LedgerManager;
 import org.apache.fineract.cn.accounting.importer.AccountImporter;
 import org.apache.fineract.cn.accounting.importer.LedgerImporter;
@@ -128,6 +134,8 @@ public class ServiceRunner {
   private static Microservice<PayrollManager> payrollManager;
   private static Microservice<GroupManager> groupManager;
   private static Microservice<NotificationManager> notificationManager;
+
+  private static final List<ServiceBackend> activeServices = new ArrayList<>();
 
   private static DB embeddedMariaDb;
 
@@ -261,7 +269,7 @@ public class ServiceRunner {
     startService(generalProperties, ServiceRunner.notificationManager);
   }
 
-  @After
+  /*@After
   public void tearDown() throws Exception {
     ServiceRunner.notificationManager.kill();
     ServiceRunner.groupManager.kill();
@@ -281,7 +289,7 @@ public class ServiceRunner {
       ServiceRunner.embeddedMariaDb.stop();
       EmbeddedCassandraServerHelper.cleanEmbeddedCassandra();
     }
-  }
+  }*/
 
   @Test
   public void startDevServer() throws InterruptedException, IOException, ArtifactResolutionException {
@@ -321,12 +329,27 @@ public class ServiceRunner {
     }
   }
 
-  private void startService(ExtraProperties properties, Microservice microservice) throws InterruptedException, IOException, ArtifactResolutionException {
+  private void startService(ExtraProperties properties,  Microservice<?> microservice) throws MalformedURLException, ClassNotFoundException,IllegalAccessException, InstantiationException, NoSuchMethodException, InvocationTargetException, InterruptedException, ArtifactResolutionException, IOException {
     if (this.runInDebug) {
       microservice.runInDebug();
     }
     microservice.addProperties(properties);
+    File jarFile = new File("/home/ikamga/.m2/repository/org/apache/fineract/cn/"
+            + microservice.getArtifactName() + "/service-boot/0.1.0-BUILD-SNAPSHOT/service-boot-0.1.0-BUILD-SNAPSHOT.jar");
+
+    URL[] serviceUrls = new URL[] { jarFile.toURI().toURL()};
+    ClassLoader serviceClassLoader = new URLClassLoader(serviceUrls, ServiceRunner.class.getClassLoader());
+    Class<?> serviceRunnerClass = serviceClassLoader.loadClass(getMainClassName(jarFile));
+
+    Object serviceRunnerInstance = serviceRunnerClass.newInstance();
+
+    final ServiceBackend serviceBackend = new ServiceBackend(serviceRunnerClass, serviceRunnerInstance);
+    activeServices.add(serviceBackend);
+
+    Method runMethod = serviceRunnerClass.getMethod("main", String[].class);
+    runMethod.invoke(null, new Object[] {new String[] {serviceRunnerInstance.toString()}});
     microservice.start();
+
     final boolean registered = microservice.waitTillRegistered(discoveryClient);
     logger.info("Service '{}' started and {} with Eureka.", microservice.name(), registered ? "registered" : "not registered");
     if (this.runInDebug) {
@@ -723,6 +746,22 @@ public class ServiceRunner {
 
     if (this.environment.containsProperty(ServiceRunner.CUSTOM_PROP_PREFIX + MariaDBConstants.MARIADB_PASSWORD_PROP)) {
       properties.setProperty(MariaDBConstants.MARIADB_PASSWORD_PROP, this.environment.getProperty(ServiceRunner.CUSTOM_PROP_PREFIX + MariaDBConstants.MARIADB_PASSWORD_PROP));
+    }
+  }
+
+  private static String getMainClassName(File fatJar) throws IOException {
+    try (JarFile jarFile = new JarFile(fatJar)) {
+      return jarFile.getManifest().getMainAttributes().getValue(Attributes.Name.MAIN_CLASS);
+    }
+  }
+
+  private static class ServiceBackend {
+    private Class<?> runnerClass;
+    private Object runnerInstance;
+
+    public ServiceBackend(final Class<?> runnerClass, final Object runnerInstance) {
+      this.runnerClass = runnerClass;
+      this.runnerInstance = runnerInstance;
     }
   }
 }
